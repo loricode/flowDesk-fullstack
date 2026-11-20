@@ -1,0 +1,11 @@
+# Contexto de build de la API y el Worker (raíz del repositorio)
+**/bin
+**/obj
+**/node_modules
+backend/.data
+frontend
+desktop
+e2e
+docs
+.git
+.vs

@@ -1,0 +1,228 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  FlowDesk - infraestructura base: S3 (documentos), SQS + DLQ (procesamiento asíncrono),
+  RDS SQL Server (datos), CloudWatch (logs y alarmas) e IAM (mínimo privilegio para API y Worker).
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [dev, staging, prod]
+    Default: dev
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  PrivateSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Subredes privadas para RDS (mínimo dos zonas de disponibilidad).
+  AppSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: Security group de las tareas de la API y el Worker (ECS/Fargate).
+  DbInstanceClass:
+    Type: String
+    Default: db.t3.small
+  AlarmEmail:
+    Type: String
+    Default: ''
+
+Conditions:
+  IsProd: !Equals [!Ref Environment, prod]
+  HasAlarmEmail: !Not [!Equals [!Ref AlarmEmail, '']]
+
+Resources:
+  # ---------------- S3: archivos de documentos ----------------
+  DocumentsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Sub flowdesk-${Environment}-documents-${AWS::AccountId}
+      VersioningConfiguration: { Status: Enabled }
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules: [{ ObjectOwnership: BucketOwnerEnforced }]
+      LifecycleConfiguration:
+        Rules:
+          - Id: archive-old-versions
+            Status: Enabled
+            NoncurrentVersionTransitions:
+              - { StorageClass: GLACIER_IR, TransitionInDays: 90 }
+
+  DocumentsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref DocumentsBucket
+      PolicyDocument:
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource: [!GetAtt DocumentsBucket.Arn, !Sub '${DocumentsBucket.Arn}/*']
+            Condition: { Bool: { 'aws:SecureTransport': 'false' } }
+
+  # ---------------- SQS: eventos de negocio ----------------
+  EventsDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub flowdesk-${Environment}-events-dlq
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+
+  EventsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub flowdesk-${Environment}-events
+      VisibilityTimeout: 60
+      ReceiveMessageWaitTimeSeconds: 20
+      SqsManagedSseEnabled: true
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt EventsDeadLetterQueue.Arn
+        maxReceiveCount: 5
+
+  # ---------------- RDS: SQL Server ----------------
+  DbSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: FlowDesk RDS
+      SubnetIds: !Ref PrivateSubnetIds
+
+  DbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: SQL Server accesible solo desde la API y el Worker
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 1433, ToPort: 1433, SourceSecurityGroupId: !Ref AppSecurityGroupId }
+
+  Database:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: !Sub flowdesk-${Environment}
+      Engine: !If [IsProd, sqlserver-se, sqlserver-ex]
+      LicenseModel: license-included
+      DBInstanceClass: !Ref DbInstanceClass
+      AllocatedStorage: 20
+      MaxAllocatedStorage: 200
+      StorageType: gp3
+      StorageEncrypted: true
+      MasterUsername: flowdesk_admin
+      ManageMasterUserPassword: true          # Contraseña gestionada en Secrets Manager
+      MultiAZ: !If [IsProd, true, false]
+      BackupRetentionPeriod: !If [IsProd, 14, 3]
+      DBSubnetGroupName: !Ref DbSubnetGroup
+      VPCSecurityGroups: [!Ref DbSecurityGroup]
+      PubliclyAccessible: false
+      EnableCloudwatchLogsExports: [error, agent]
+      DeletionProtection: !If [IsProd, true, false]
+
+  # ---------------- CloudWatch ----------------
+  ApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /flowdesk/${Environment}/api
+      RetentionInDays: 30
+
+  WorkerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /flowdesk/${Environment}/worker
+      RetentionInDays: 30
+
+  AlarmTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      Subscription: !If
+        - HasAlarmEmail
+        - [{ Protocol: email, Endpoint: !Ref AlarmEmail }]
+        - !Ref AWS::NoValue
+
+  DeadLetterAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Hay eventos que fallaron 5 veces y quedaron en la DLQ.
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions: [{ Name: QueueName, Value: !GetAtt EventsDeadLetterQueue.QueueName }]
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions: [!Ref AlarmTopic]
+
+  QueueBacklogAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: La cola acumula mensajes antiguos; escalar el Worker.
+      Namespace: AWS/SQS
+      MetricName: ApproximateAgeOfOldestMessage
+      Dimensions: [{ Name: QueueName, Value: !GetAtt EventsQueue.QueueName }]
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 300
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions: [!Ref AlarmTopic]
+
+  # ---------------- IAM: mínimo privilegio ----------------
+  ApiTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub flowdesk-${Environment}-api
+      AssumeRolePolicyDocument:
+        Statement:
+          - { Effect: Allow, Principal: { Service: ecs-tasks.amazonaws.com }, Action: 'sts:AssumeRole' }
+      Policies:
+        - PolicyName: documents-and-events
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action: ['s3:PutObject', 's3:GetObject', 's3:DeleteObject']
+                Resource: !Sub '${DocumentsBucket.Arn}/expedients/*'
+              - Effect: Allow
+                Action: ['secretsmanager:GetSecretValue']
+                Resource: !GetAtt Database.MasterUserSecret.SecretArn
+
+  WorkerTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub flowdesk-${Environment}-worker
+      AssumeRolePolicyDocument:
+        Statement:
+          - { Effect: Allow, Principal: { Service: ecs-tasks.amazonaws.com }, Action: 'sts:AssumeRole' }
+      Policies:
+        - PolicyName: process-events
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action: ['s3:GetObject']
+                Resource: !Sub '${DocumentsBucket.Arn}/expedients/*'
+              - Effect: Allow
+                Action: ['sqs:SendMessage', 'sqs:ReceiveMessage', 'sqs:DeleteMessage', 'sqs:GetQueueAttributes']
+                Resource: !GetAtt EventsQueue.Arn
+              - Effect: Allow
+                Action: ['secretsmanager:GetSecretValue']
+                Resource: !GetAtt Database.MasterUserSecret.SecretArn
+
+Outputs:
+  BucketName:
+    Value: !Ref DocumentsBucket
+    Description: Storage__BucketName
+  QueueUrl:
+    Value: !Ref EventsQueue
+    Description: Messaging__QueueUrl
+  DatabaseEndpoint:
+    Value: !GetAtt Database.Endpoint.Address
+  DatabaseSecretArn:
+    Value: !GetAtt Database.MasterUserSecret.SecretArn
+  ApiTaskRoleArn:
+    Value: !GetAtt ApiTaskRole.Arn
+  WorkerTaskRoleArn:
+    Value: !GetAtt WorkerTaskRole.Arn

@@ -1,0 +1,84 @@
+# Entorno completo "como en AWS" en local:
+#   SQL Server (RDS) · LocalStack (S3 + SQS) · API · Worker · Web
+#
+#   cd infrastructure/deployment
+#   docker compose up --build
+#
+# Web: http://localhost:8081 · API: http://localhost:5080 · LocalStack: http://localhost:4566
+name: flowdesk
+
+x-backend-env: &backend-env
+  DOTNET_ENVIRONMENT: Production
+  ASPNETCORE_ENVIRONMENT: Production
+  ConnectionStrings__FlowDesk: "Server=sqlserver;Database=FlowDesk;User Id=sa;Password=${SA_PASSWORD:-FlowDesk!2026};TrustServerCertificate=True"
+  Database__Provider: SqlServer
+  Database__EnsureCreated: "false"        # El esquema lo crean los scripts versionados (db-init)
+  Database__SeedDemoData: "true"
+  Storage__Provider: S3
+  Storage__BucketName: flowdesk-documents
+  Messaging__Provider: Sqs
+  Messaging__QueueUrl: http://localstack:4566/000000000000/flowdesk-events
+  AWS__ServiceURL: http://localstack:4566
+  AWS__Region: us-east-1
+  AWS_ACCESS_KEY_ID: test
+  AWS_SECRET_ACCESS_KEY: test
+  Jwt__SigningKey: ${JWT_SIGNING_KEY:-compose-only-signing-key-change-me-0123456789}
+  RealtimeRelay__InternalApiKey: ${INTERNAL_API_KEY:-compose-internal-key}
+
+services:
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: ${SA_PASSWORD:-FlowDesk!2026}
+    ports: ["14333:1433"]
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -C -Q 'SELECT 1' || exit 1"]
+      interval: 10s
+      retries: 12
+
+  db-init:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    depends_on:
+      sqlserver: { condition: service_healthy }
+    environment:
+      SA_PASSWORD: ${SA_PASSWORD:-FlowDesk!2026}
+    volumes:
+      - ../../database:/database:ro
+      - ./db-init.sh:/db-init.sh:ro
+    entrypoint: ["/bin/bash", "/db-init.sh"]
+
+  localstack:
+    image: localstack/localstack:3
+    environment:
+      SERVICES: s3,sqs
+    ports: ["4566:4566"]
+    volumes:
+      - ./localstack-init.sh:/etc/localstack/init/ready.d/init-aws.sh:ro
+
+  api:
+    build: { context: ../.., dockerfile: backend/FlowDesk.API/Dockerfile }
+    depends_on:
+      db-init: { condition: service_completed_successfully }
+      localstack: { condition: service_started }
+    environment:
+      <<: *backend-env
+      Cors__Origins__0: http://localhost:8081
+    ports: ["5080:8080"]
+
+  worker:
+    build: { context: ../.., dockerfile: backend/FlowDesk.Worker/Dockerfile }
+    depends_on:
+      api: { condition: service_started }
+    environment:
+      <<: *backend-env
+      RealtimeRelay__ApiBaseUrl: http://api:8080
+    deploy:
+      replicas: 1   # Escalable horizontalmente: la idempotencia del consumidor tolera entregas repetidas.
+
+  web:
+    build:
+      context: ../../frontend
+      args: { VITE_API_URL: http://localhost:5080 }
+    depends_on: [api]
+    ports: ["8081:80"]

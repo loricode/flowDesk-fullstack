@@ -1,0 +1,15 @@
+{
+  "name": "flowdesk-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w @flowdesk/web",
+    "build": "npm run build -w @flowdesk/web",
+    "typecheck": "tsc -b apps/web",
+    "preview": "npm run preview -w @flowdesk/web"
+  }
+}

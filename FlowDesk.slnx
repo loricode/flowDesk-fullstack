@@ -1,0 +1,15 @@
+<Solution>
+  <Folder Name="/backend/">
+    <Project Path="backend/FlowDesk.API/FlowDesk.API.csproj" />
+    <Project Path="backend/FlowDesk.Application/FlowDesk.Application.csproj" />
+    <Project Path="backend/FlowDesk.Domain/FlowDesk.Domain.csproj" />
+    <Project Path="backend/FlowDesk.Infrastructure/FlowDesk.Infrastructure.csproj" />
+    <Project Path="backend/FlowDesk.Realtime/FlowDesk.Realtime.csproj" />
+    <Project Path="backend/FlowDesk.Shared/FlowDesk.Shared.csproj" />
+    <Project Path="backend/FlowDesk.Tests/FlowDesk.Tests.csproj" />
+    <Project Path="backend/FlowDesk.Worker/FlowDesk.Worker.csproj" />
+  </Folder>
+  <Folder Name="/desktop/">
+    <Project Path="desktop/FlowDesk.Desktop/FlowDesk.Desktop.csproj" />
+  </Folder>
+</Solution>

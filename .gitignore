@@ -1,0 +1,33 @@
+# .NET
+bin/
+obj/
+*.user
+.vs/
+TestResults/
+
+# Node
+node_modules/
+dist/
+*.tsbuildinfo
+.vite/
+
+# Playwright
+e2e/playwright/test-results/
+e2e/playwright/playwright-report/
+e2e/playwright/blob-report/
+
+# Datos locales (SQLite, almacenamiento de documentos)
+backend/.data/
+*.db
+*.db-shm
+*.db-wal
+
+# Entorno
+.env
+.env.local
+appsettings.*.local.json
+
+# SO / IDE
+.DS_Store
+Thumbs.db
+.idea/

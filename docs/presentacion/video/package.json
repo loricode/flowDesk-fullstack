@@ -1,0 +1,13 @@
+{
+  "name": "flowdesk-video",
+  "private": true,
+  "description": "Graba el video del camino feliz de FlowDesk sobre la aplicación real (ver LEEME.md)",
+  "scripts": {
+    "prueba": "node grabar.js --prueba",
+    "grabar": "node grabar.js"
+  },
+  "dependencies": {
+    "ffmpeg-static": "^5.2.0",
+    "playwright-core": "^1.65.1"
+  }
+}
